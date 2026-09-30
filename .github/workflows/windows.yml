@@ -1,0 +1,403 @@
+name: RDP Dev Environment
+
+on:
+  workflow_dispatch:
+
+jobs:
+  dev-rdp:
+    runs-on: windows-latest
+    timeout-minutes: 3600
+
+    steps:
+      - name: Configure RDP
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          Write-Host "Enabling RDP..."
+
+          Set-ItemProperty `
+            -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
+            -Name "fDenyTSConnections" `
+            -Value 0 -Force
+
+          Set-ItemProperty `
+            -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
+            -Name "UserAuthentication" `
+            -Value 0 -Force
+
+          Set-ItemProperty `
+            -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
+            -Name "SecurityLayer" `
+            -Value 0 -Force
+
+          netsh advfirewall firewall delete rule name="RDP-Dev" 2>$null
+
+          netsh advfirewall firewall add rule `
+            name="RDP-Dev" `
+            dir=in `
+            action=allow `
+            protocol=TCP `
+            localport=3389
+
+          Restart-Service -Name TermService -Force
+
+          Write-Host "RDP enabled."
+
+      - name: Create RDP User
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          # Short password: 3 upper + 3 lower + 2 digit + 2 special = 10 chars
+          $upper   = [char[]](65..90)  | Get-Random -Count 3
+          $lower   = [char[]](97..122) | Get-Random -Count 3
+          $digits  = [char[]](48..57)  | Get-Random -Count 2
+          $special = @('!','@','#','$','%') | Get-Random -Count 2
+
+          $raw = @() + $upper + $lower + $digits + $special
+          $password = -join ($raw | Sort-Object { Get-Random })
+
+          $securePass = ConvertTo-SecureString $password -AsPlainText -Force
+
+          $existing = Get-LocalUser -Name "Dev" -ErrorAction SilentlyContinue
+
+          if ($existing) {
+              Set-LocalUser -Name "Dev" -Password $securePass
+              Write-Host "User updated."
+          } else {
+              New-LocalUser `
+                -Name "Dev" `
+                -Password $securePass `
+                -AccountNeverExpires `
+                -PasswordNeverExpires:$true
+              Write-Host "User created."
+          }
+
+          Add-LocalGroupMember -Group "Administrators"        -Member "Dev" -ErrorAction SilentlyContinue
+          Add-LocalGroupMember -Group "Remote Desktop Users"  -Member "Dev" -ErrorAction SilentlyContinue
+
+          "RDP_USERNAME=Dev"        >> $env:GITHUB_ENV
+          "RDP_PASSWORD=$password"  >> $env:GITHUB_ENV
+
+          Write-Host "User ready. Password: $password"
+
+      - name: Install VS Code
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          Write-Host "Downloading VS Code..."
+
+          $url  = "https://update.code.visualstudio.com/latest/win32-x64/stable"
+          $dest = Join-Path $env:TEMP "vscode.exe"
+
+          Invoke-WebRequest -Uri $url -OutFile $dest
+
+          Write-Host "Installing VS Code..."
+
+          Start-Process -FilePath $dest `
+            -ArgumentList "/VERYSILENT", "/NORESTART", "/MERGETASKS=!runcode,addcontextmenufiles,addcontextmenufolders,associatewithfiles,addtopath" `
+            -Wait
+
+          Remove-Item $dest -Force -ErrorAction SilentlyContinue
+
+          Write-Host "VS Code installed."
+
+      - name: Install Python
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          Write-Host "Downloading Python 3.11..."
+
+          $url  = "https://www.python.org/ftp/python/3.11.9/python-3.11.9-amd64.exe"
+          $dest = Join-Path $env:TEMP "python.exe"
+
+          Invoke-WebRequest -Uri $url -OutFile $dest
+
+          Write-Host "Installing Python..."
+
+          Start-Process -FilePath $dest `
+            -ArgumentList "/quiet", "InstallAllUsers=1", "PrependPath=1", "Include_pip=1", "Include_test=0" `
+            -Wait
+
+          Remove-Item $dest -Force -ErrorAction SilentlyContinue
+
+          # Refresh PATH for subsequent steps
+          $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + `
+                      [System.Environment]::GetEnvironmentVariable("Path","User")
+
+          python --version
+          pip --version
+
+          Write-Host "Python installed."
+
+      - name: Install Java (Temurin 21 LTS)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          Write-Host "Downloading Eclipse Temurin 21..."
+
+          $url  = "https://github.com/adoptium/temurin21-binaries/releases/download/jdk-21.0.3%2B9/OpenJDK21U-jdk_x64_windows_hotspot_21.0.3_9.msi"
+          $dest = Join-Path $env:TEMP "java.msi"
+
+          Invoke-WebRequest -Uri $url -OutFile $dest
+
+          Write-Host "Installing Java..."
+
+          $proc = Start-Process -FilePath "msiexec.exe" `
+            -ArgumentList "/i", "`"$dest`"", "/quiet", "/norestart", "ADDLOCAL=FeatureMain,FeatureEnvironment,FeatureJarFileRunWith,FeatureJavaHome" `
+            -Wait -PassThru
+
+          if ($proc.ExitCode -ne 0) {
+              throw "Java install failed: exit $($proc.ExitCode)"
+          }
+
+          Remove-Item $dest -Force -ErrorAction SilentlyContinue
+
+          $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + `
+                      [System.Environment]::GetEnvironmentVariable("Path","User")
+
+          java -version
+
+          Write-Host "Java installed."
+
+      - name: Install C++ Build Tools (MSVC)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          Write-Host "Downloading VS Build Tools..."
+
+          $url  = "https://aka.ms/vs/17/release/vs_BuildTools.exe"
+          $dest = Join-Path $env:TEMP "vs_buildtools.exe"
+
+          Invoke-WebRequest -Uri $url -OutFile $dest
+
+          Write-Host "Installing C++ workload (this takes a few minutes)..."
+
+          $proc = Start-Process -FilePath $dest `
+            -ArgumentList "--quiet", "--wait", "--norestart", "--nocache", `
+              "--add", "Microsoft.VisualStudio.Workload.VCTools", `
+              "--add", "Microsoft.VisualStudio.Component.Windows11SDK.22621", `
+              "--add", "Microsoft.VisualStudio.Component.VC.Tools.x86.x64" `
+            -Wait -PassThru
+
+          Remove-Item $dest -Force -ErrorAction SilentlyContinue
+
+          Write-Host "C++ Build Tools installed. Exit: $($proc.ExitCode)"
+
+      - name: Install VS Code Extensions
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "SilentlyContinue"
+
+          $codePath = "C:\Program Files\Microsoft VS Code\bin\code.cmd"
+
+          if (-not (Test-Path $codePath)) {
+              $codePath = (Get-Command code -ErrorAction SilentlyContinue)?.Source
+          }
+
+          $extensions = @(
+              "ms-python.python",
+              "ms-python.pylance",
+              "ms-vscode.cpptools",
+              "ms-vscode.cpptools-extension-pack",
+              "redhat.java",
+              "vscjava.vscode-java-pack",
+              "ms-toolsai.jupyter"
+          )
+
+          foreach ($ext in $extensions) {
+              Write-Host "Installing extension: $ext"
+              & $codePath --install-extension $ext --force 2>&1
+          }
+
+          Write-Host "Extensions installed."
+
+      - name: Install Python AI/ML Stack
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + `
+                      [System.Environment]::GetEnvironmentVariable("Path","User")
+
+          Write-Host "Installing Python AI/ML packages..."
+
+          # Core ML
+          pip install --upgrade pip
+
+          # Check GPU — GH runners are CPU only, so we install CPU torch
+          # If you connect your own GPU runner, swap this for the CUDA index URL
+          pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
+
+          # Transformers stack — covers LLM + image gen model loading
+          pip install `
+            transformers `
+            diffusers `
+            accelerate `
+            sentencepiece `
+            safetensors `
+            huggingface_hub
+
+          # Image gen deps
+          pip install `
+            Pillow `
+            opencv-python `
+            xformers --no-deps
+
+          # Model runners / inference
+          pip install `
+            ollama `
+            llama-cpp-python `
+            gradio
+
+          # General science
+          pip install `
+            numpy `
+            scipy `
+            scikit-learn `
+            matplotlib `
+            pandas `
+            jupyter
+
+          Write-Host "AI/ML stack installed."
+
+      - name: Install Ollama (Local Model Runner)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          Write-Host "Downloading Ollama..."
+
+          $url  = "https://ollama.com/download/OllamaSetup.exe"
+          $dest = Join-Path $env:TEMP "ollama.exe"
+
+          Invoke-WebRequest -Uri $url -OutFile $dest
+
+          Write-Host "Installing Ollama..."
+
+          Start-Process -FilePath $dest -ArgumentList "/S" -Wait
+
+          Remove-Item $dest -Force -ErrorAction SilentlyContinue
+
+          # Start Ollama service in background
+          $ollamaExe = Join-Path $env:LOCALAPPDATA "Programs\Ollama\ollama.exe"
+
+          if (Test-Path $ollamaExe) {
+              Start-Process -FilePath $ollamaExe -ArgumentList "serve" -WindowStyle Hidden
+              Start-Sleep -Seconds 5
+              Write-Host "Ollama running at http://127.0.0.1:11434"
+          } else {
+              Write-Host "Ollama exe not found at expected path — may need manual start"
+          }
+
+          Write-Host "Ollama installed."
+
+      - name: Install Tailscale
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $url  = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
+          $dest = Join-Path $env:TEMP "tailscale.msi"
+
+          Write-Host "Downloading Tailscale..."
+          Invoke-WebRequest -Uri $url -OutFile $dest
+
+          $proc = Start-Process -FilePath "msiexec.exe" `
+            -ArgumentList "/i", "`"$dest`"", "/quiet", "/norestart" `
+            -Wait -PassThru
+
+          if ($proc.ExitCode -ne 0) {
+              throw "Tailscale install failed: exit $($proc.ExitCode)"
+          }
+
+          Remove-Item $dest -Force -ErrorAction SilentlyContinue
+
+          Write-Host "Tailscale installed."
+
+      - name: Connect Tailscale
+        shell: pwsh
+        env:
+          TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $tsExe = Join-Path $env:ProgramFiles "Tailscale\tailscale.exe"
+
+          if (-not (Test-Path $tsExe)) {
+              throw "Tailscale not found at $tsExe"
+          }
+
+          & $tsExe up `
+            --authkey="$env:TAILSCALE_AUTH_KEY" `
+            --hostname="gh-dev-$env:GITHUB_RUN_ID"
+
+          if ($LASTEXITCODE -ne 0) {
+              throw "Tailscale connect failed."
+          }
+
+          $tsIP = $null
+
+          for ($i = 1; $i -le 20; $i++) {
+              $tsIP = (& $tsExe ip -4 2>$null | Select-Object -First 1).Trim()
+              if ($tsIP) { break }
+              Write-Host "Waiting for IP... $i/20"
+              Start-Sleep -Seconds 3
+          }
+
+          if (-not $tsIP) { throw "No Tailscale IP assigned." }
+
+          Write-Host "Tailscale IP: $tsIP"
+          "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
+
+      - name: Verify RDP
+        shell: pwsh
+        run: |
+          $result = Test-NetConnection `
+            -ComputerName $env:TAILSCALE_IP `
+            -Port 3389 `
+            -WarningAction SilentlyContinue
+
+          if (-not $result.TcpTestSucceeded) {
+              throw "RDP port check failed."
+          }
+
+          Write-Host "RDP port 3389 — open."
+
+      - name: Display Access Info
+        shell: pwsh
+        run: |
+          Write-Host ""
+          Write-Host "========================================"
+          Write-Host "        DEV RDP ACCESS INFORMATION"
+          Write-Host "========================================"
+          Write-Host "Address  : $env:TAILSCALE_IP"
+          Write-Host "Username : $env:RDP_USERNAME"
+          Write-Host "Password : $env:RDP_PASSWORD"
+          Write-Host "========================================"
+          Write-Host ""
+          Write-Host "INSTALLED:"
+          Write-Host "  VS Code        — with Python, Java, C++ extensions"
+          Write-Host "  Python 3.11    — pip, torch (CPU), transformers, diffusers"
+          Write-Host "  Java 21 LTS    — Temurin"
+          Write-Host "  C++ MSVC       — VS Build Tools 2022"
+          Write-Host "  Ollama         — http://127.0.0.1:11434"
+          Write-Host "  Gradio         — for model UIs"
+          Write-Host ""
+          Write-Host "IMAGE GEN: run via diffusers (SDXL, FLUX, etc.) or pull via Ollama"
+          Write-Host "========================================"
+
+      - name: Keep Alive
+        shell: pwsh
+        run: |
+          Write-Host "Runner active. Cancel workflow when done."
+
+          while ($true) {
+              Write-Host "[$(Get-Date -Format 'HH:mm:ss')] alive"
+              Start-Sleep -Seconds 300
+          }

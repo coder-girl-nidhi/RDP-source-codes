@@ -1,0 +1,336 @@
+name: macOS Machine
+
+on:
+  workflow_dispatch:
+
+jobs:
+  macos-machine:
+    runs-on: macos-latest
+    timeout-minutes: 360
+
+    steps:
+      - name: System Info
+        run: |
+          echo "========================================"
+          echo "macOS Version:"
+          sw_vers
+          echo "CPU:"
+          sysctl -n machdep.cpu.brand_string
+          echo "RAM:"
+          system_profiler SPHardwareDataType | grep "Memory:"
+          echo "Disk:"
+          df -h /
+          echo "========================================"
+
+      - name: Install Homebrew Packages
+        run: |
+          brew update --quiet
+
+          brew install \
+            git \
+            curl \
+            wget \
+            vim \
+            nano \
+            htop \
+            tree \
+            jq \
+            tmux \
+            zsh \
+            coreutils \
+            findutils \
+            gnu-sed \
+            grep
+
+          echo "Core tools installed."
+
+      - name: Install Dev Languages
+        run: |
+          brew install python@3.11
+          python3.11 --version
+          python3.11 -m pip install --upgrade pip
+
+          brew install --cask temurin@21
+          java -version
+
+          brew install node
+          node --version
+
+          brew install go
+          go version
+
+          brew install ruby
+          ruby --version
+
+          echo "Dev languages installed."
+
+      - name: Install VS Code
+        run: |
+          brew install --cask visual-studio-code
+
+          export PATH="$PATH:/Applications/Visual Studio Code.app/Contents/Resources/app/bin"
+
+          code --version
+
+          extensions=(
+            "ms-python.python"
+            "ms-python.pylance"
+            "ms-vscode.cpptools"
+            "redhat.java"
+            "vscjava.vscode-java-pack"
+            "ms-toolsai.jupyter"
+            "golang.go"
+            "dbaeumer.vscode-eslint"
+          )
+
+          for ext in "${extensions[@]}"; do
+            echo "Installing: $ext"
+            code --install-extension "$ext" --force
+          done
+
+          echo "VS Code ready."
+
+      - name: Install Python AI/ML Stack
+        run: |
+          # Explicit python3.11 interpreter — no ambiguity
+          python3.11 -m venv /opt/aienv
+
+          source /opt/aienv/bin/activate
+
+          pip install --upgrade pip
+
+          # CPU torch — GH runners have no GPU
+          pip install \
+            torch torchvision torchaudio
+
+          pip install \
+            transformers \
+            diffusers \
+            accelerate \
+            safetensors \
+            huggingface_hub \
+            sentencepiece \
+            Pillow \
+            opencv-python \
+            numpy \
+            scipy \
+            scikit-learn \
+            matplotlib \
+            pandas \
+            jupyter \
+            gradio \
+            requests \
+            httpx \
+            rich
+
+          deactivate
+
+          # Write activation path to env for later steps
+          echo "AIENV=/opt/aienv" >> $GITHUB_ENV
+
+          echo "AI/ML stack installed in venv."
+
+      - name: Install Ollama
+        run: |
+          brew install ollama
+
+          # Start Ollama service
+          ollama serve &
+          OLLAMA_PID=$!
+
+          echo "Waiting for Ollama to be ready..."
+
+          # Poll until Ollama responds
+          for i in $(seq 1 20); do
+            if curl -sf http://127.0.0.1:11434 > /dev/null 2>&1; then
+              echo "Ollama ready."
+              break
+            fi
+            echo "Waiting... $i/20"
+            sleep 3
+          done
+
+          # Pull tinyllama — wait for completion this time
+          echo "Pulling tinyllama model..."
+          ollama pull tinyllama
+
+          echo "Ollama + tinyllama ready at http://127.0.0.1:11434"
+
+      - name: Install Security Tools
+        run: |
+          brew install \
+            nmap \
+            netcat \
+            socat \
+            hydra \
+            john \
+            hashcat \
+            aircrack-ng \
+            sqlmap \
+            nikto \
+            gobuster \
+            ffuf \
+            amass \
+            subfinder \
+            httpx \
+            nuclei \
+            naabu \
+            katana \
+            wireshark \
+            tcpdump \
+            exiftool \
+            binwalk \
+            radare2
+
+          echo "Security tools installed."
+
+      - name: Install Python Security Libraries
+        run: |
+          source /opt/aienv/bin/activate
+
+          pip install \
+            impacket \
+            pwntools \
+            scapy \
+            paramiko \
+            cryptography \
+            pyopenssl \
+            dnspython \
+            netaddr \
+            shodan \
+            colorama
+
+          deactivate
+
+          echo "Security libs installed."
+
+      - name: Configure User + SSH
+        run: |
+          # Short password — 10 chars, mixed
+          UPPER=$(cat /dev/urandom | LC_ALL=C tr -dc 'A-Z' | head -c3)
+          LOWER=$(cat /dev/urandom | LC_ALL=C tr -dc 'a-z' | head -c3)
+          DIGITS=$(cat /dev/urandom | LC_ALL=C tr -dc '0-9' | head -c2)
+          SPECIAL=$(cat /dev/urandom | LC_ALL=C tr -dc '!@#$%' | head -c2)
+
+          RAW="${UPPER}${LOWER}${DIGITS}${SPECIAL}"
+          PASSWORD=$(echo "$RAW" | fold -w1 | sort -R | tr -d '\n')
+
+          USERNAME="mac"
+
+          # Create user
+          sudo dscl . -create /Users/$USERNAME
+          sudo dscl . -create /Users/$USERNAME UserShell /bin/zsh
+          sudo dscl . -create /Users/$USERNAME RealName "Mac User"
+          sudo dscl . -create /Users/$USERNAME UniqueID 1001
+          sudo dscl . -create /Users/$USERNAME PrimaryGroupID 80
+          sudo dscl . -create /Users/$USERNAME NFSHomeDirectory /Users/$USERNAME
+          sudo dscl . -passwd /Users/$USERNAME "$PASSWORD"
+          sudo dscl . -append /Groups/admin GroupMembership $USERNAME
+
+          sudo createhomedir -c -u $USERNAME 2>/dev/null || true
+
+          # Mask password everywhere except display step
+          echo "::add-mask::${PASSWORD}"
+
+          echo "MAC_USERNAME=$USERNAME" >> $GITHUB_ENV
+          echo "MAC_PASSWORD=$PASSWORD" >> $GITHUB_ENV
+
+          # Enable SSH
+          sudo systemsetup -setremotelogin on 2>/dev/null || \
+            sudo launchctl load -w /System/Library/LaunchDaemons/ssh.plist 2>/dev/null || \
+            sudo launchctl enable system/com.openssh.sshd 2>/dev/null || true
+
+          echo "User and SSH configured."
+
+      - name: Enable Screen Sharing (VNC)
+        run: |
+          # Enable macOS built-in Screen Sharing (VNC on port 5900)
+          sudo defaults write /var/db/launchd.db/com.apple.launchd/overrides.plist \
+            com.apple.screensharing -dict Disabled -bool false 2>/dev/null || true
+
+          sudo launchctl load -w \
+            /System/Library/LaunchDaemons/com.apple.screensharing.plist 2>/dev/null || true
+
+          # Set VNC password (max 8 chars for macOS VNC)
+          VNC_PASS=$(echo "$MAC_PASSWORD" | cut -c1-8)
+
+          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
+            -activate \
+            -configure \
+            -access -on \
+            -clientopts -setvnclegacy -vnclegacy yes \
+            -clientopts -setvncpw -vncpw "$VNC_PASS" \
+            -restart -agent \
+            -privs -all 2>/dev/null || true
+
+          echo "VNC_PASSWORD=$VNC_PASS" >> $GITHUB_ENV
+
+          echo "Screen Sharing (VNC) enabled on port 5900."
+
+      - name: Install Tailscale
+        run: |
+          brew install tailscale
+          echo "Tailscale installed."
+
+      - name: Connect Tailscale
+        env:
+          TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
+        run: |
+          sudo tailscaled &
+          sleep 5
+
+          sudo tailscale up \
+            --authkey="$TAILSCALE_AUTH_KEY" \
+            --hostname="macos-runner-$GITHUB_RUN_ID"
+
+          sleep 5
+
+          TSIP=$(tailscale ip -4 2>/dev/null | head -1 | tr -d '[:space:]')
+
+          echo "Tailscale IP: $TSIP"
+          echo "TAILSCALE_IP=$TSIP" >> $GITHUB_ENV
+
+      - name: Verify Connectivity
+        run: |
+          sleep 3
+          nc -zv $TAILSCALE_IP 22   && echo "SSH port 22   — open" || echo "SSH not ready"
+          nc -zv $TAILSCALE_IP 5900 && echo "VNC port 5900 — open" || echo "VNC not ready"
+
+      - name: Display Access Info
+        run: |
+          echo ""
+          echo "========================================"
+          echo "       macOS MACHINE ACCESS INFO"
+          echo "========================================"
+          echo "Tailscale IP  : $TAILSCALE_IP"
+          echo "Username      : $MAC_USERNAME"
+          echo "Password      : $MAC_PASSWORD"
+          echo "SSH Port      : 22"
+          echo "VNC Port      : 5900  (use any VNC client)"
+          echo "VNC Password  : $VNC_PASSWORD"
+          echo "========================================"
+          echo ""
+          echo "SSH command:"
+          echo "  ssh $MAC_USERNAME@$TAILSCALE_IP"
+          echo ""
+          echo "VNC — connect your VNC client to:"
+          echo "  $TAILSCALE_IP:5900"
+          echo ""
+          echo "INSTALLED:"
+          echo "  VS Code        — Python, Java, C++, Go, Jupyter extensions"
+          echo "  Python 3.11    — venv at /opt/aienv"
+          echo "  Java 21 LTS    — Temurin"
+          echo "  Node.js + Go + Ruby"
+          echo "  Ollama         — http://127.0.0.1:11434 (tinyllama ready)"
+          echo "  Security       — nmap, hydra, sqlmap, gobuster, nuclei, ffuf"
+          echo "                   aircrack-ng, radare2, binwalk, wireshark"
+          echo "  AI/ML          — torch, transformers, diffusers, gradio"
+          echo "========================================"
+
+      - name: Keep Alive
+        run: |
+          echo "macOS runner active. Cancel workflow when done."
+          while true; do
+            echo "[$(date '+%H:%M:%S')] alive"
+            sleep 300
+          done
