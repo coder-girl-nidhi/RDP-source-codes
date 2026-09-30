@@ -1,0 +1,377 @@
+name: Kali Linux
+
+on:
+  workflow_dispatch:
+
+jobs:
+  kali-machine:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3600
+
+    steps:
+      - name: Bootstrap Kali Linux (Docker)
+        run: |
+          echo "Pulling Kali rolling..."
+
+          docker pull kalilinux/kali-rolling
+
+          echo "Kali image ready."
+
+      - name: Install Core Kali Tools
+        run: |
+          docker run -d \
+            --name kali \
+            --privileged \
+            --network host \
+            kalilinux/kali-rolling \
+            tail -f /dev/null
+
+          echo "Installing Kali tools..."
+
+          docker exec kali bash -c "
+            export DEBIAN_FRONTEND=noninteractive
+
+            apt-get update -qq
+
+            # Core system
+            apt-get install -y --no-install-recommends \
+              sudo \
+              curl \
+              wget \
+              git \
+              vim \
+              nano \
+              unzip \
+              zip \
+              tar \
+              net-tools \
+              iputils-ping \
+              dnsutils \
+              whois \
+              traceroute \
+              tcpdump \
+              netcat-traditional \
+              socat \
+              openssh-server \
+              xrdp \
+              xfce4 \
+              xfce4-goodies \
+              dbus-x11 \
+              x11-xserver-utils \
+              --fix-missing
+
+            # Recon & OSINT
+            apt-get install -y --no-install-recommends \
+              nmap \
+              masscan \
+              amass \
+              subfinder \
+              theHarvester \
+              maltego \
+              recon-ng \
+              dmitry \
+              --fix-missing
+
+            # Web hacking
+            apt-get install -y --no-install-recommends \
+              burpsuite \
+              nikto \
+              dirb \
+              gobuster \
+              ffuf \
+              wfuzz \
+              sqlmap \
+              whatweb \
+              wafw00f \
+              --fix-missing
+
+            # Password attacks
+            apt-get install -y --no-install-recommends \
+              hydra \
+              john \
+              hashcat \
+              wordlists \
+              crunch \
+              medusa \
+              --fix-missing
+
+            # Exploitation
+            apt-get install -y --no-install-recommends \
+              metasploit-framework \
+              exploitdb \
+              --fix-missing
+
+            # Post exploitation & pivoting
+            apt-get install -y --no-install-recommends \
+              proxychains4 \
+              chisel \
+              ligolo-ng \
+              impacket-scripts \
+              evil-winrm \
+              --fix-missing
+
+            # Wireless
+            apt-get install -y --no-install-recommends \
+              aircrack-ng \
+              kismet \
+              bettercap \
+              --fix-missing
+
+            # Forensics & analysis
+            apt-get install -y --no-install-recommends \
+              binwalk \
+              foremost \
+              volatility3 \
+              exiftool \
+              steghide \
+              stegseek \
+              --fix-missing
+
+            # Reverse engineering
+            apt-get install -y --no-install-recommends \
+              gdb \
+              gdb-multiarch \
+              pwndbg \
+              radare2 \
+              ghidra \
+              ltrace \
+              strace \
+              --fix-missing
+
+            # Network analysis
+            apt-get install -y --no-install-recommends \
+              wireshark \
+              tshark \
+              ettercap-text-only \
+              arpwatch \
+              --fix-missing
+
+            # Scripting & dev
+            apt-get install -y --no-install-recommends \
+              python3 \
+              python3-pip \
+              python3-venv \
+              ruby \
+              golang \
+              --fix-missing
+
+            apt-get clean
+            rm -rf /var/lib/apt/lists/*
+
+            echo 'Core tools installed.'
+          "
+
+      - name: Install Python Hacking Libraries
+        run: |
+          docker exec kali bash -c "
+            pip3 install --break-system-packages \
+              impacket \
+              pwntools \
+              scapy \
+              requests \
+              httpx \
+              beautifulsoup4 \
+              paramiko \
+              cryptography \
+              pyopenssl \
+              dnspython \
+              shodan \
+              censys \
+              netaddr \
+              colorama \
+              rich
+
+            echo 'Python libs installed.'
+          "
+
+      - name: Configure RDP User
+        run: |
+          # Short password same style as your Windows one
+          UPPER=$(cat /dev/urandom | tr -dc 'A-Z' | head -c3)
+          LOWER=$(cat /dev/urandom | tr -dc 'a-z' | head -c3)
+          DIGITS=$(cat /dev/urandom | tr -dc '0-9' | head -c2)
+          SPECIAL=$(cat /dev/urandom | tr -dc '!@#$%' | head -c2)
+
+          RAW="${UPPER}${LOWER}${DIGITS}${SPECIAL}"
+          PASSWORD=$(echo "$RAW" | fold -w1 | shuf | tr -d '\n')
+
+          docker exec kali bash -c "
+            useradd -m -s /bin/bash hacker 2>/dev/null || true
+            echo 'hacker:${PASSWORD}' | chpasswd
+            usermod -aG sudo hacker
+            echo 'hacker ALL=(ALL) NOPASSWD:ALL' >> /etc/sudoers
+            echo 'User hacker configured.'
+          "
+
+          echo "RDP_USERNAME=hacker" >> $GITHUB_ENV
+          echo "RDP_PASSWORD=${PASSWORD}" >> $GITHUB_ENV
+
+          echo "Password: ${PASSWORD}"
+
+      - name: Configure XRDP Desktop
+        run: |
+          docker exec kali bash -c "
+            # XFCE session for xrdp
+            echo 'startxfce4' > /etc/skel/.xsession
+            echo 'startxfce4' > /root/.xsession
+            echo 'startxfce4' > /home/hacker/.xsession
+            chown hacker:hacker /home/hacker/.xsession
+
+            # xrdp config
+            sed -i 's/port=3389/port=3389/' /etc/xrdp/xrdp.ini
+            sed -i 's/max_bpp=32/max_bpp=24/' /etc/xrdp/xrdp.ini
+
+            # Fix xrdp color depth
+            cat > /etc/xrdp/startwm.sh << 'EOF'
+          #!/bin/bash
+          unset DBUS_SESSION_BUS_ADDRESS
+          unset XDG_RUNTIME_DIR
+          exec startxfce4
+          EOF
+
+            chmod +x /etc/xrdp/startwm.sh
+
+            # Start dbus
+            mkdir -p /var/run/dbus
+            dbus-daemon --system --fork 2>/dev/null || true
+
+            # Start xrdp
+            service xrdp start || xrdp &
+            service xrdp-sesman start || xrdp-sesman &
+
+            sleep 3
+
+            echo 'XRDP status:'
+            service xrdp status || true
+          "
+
+      - name: Configure SSH
+        run: |
+          docker exec kali bash -c "
+            mkdir -p /var/run/sshd
+
+            sed -i 's/#PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config
+            sed -i 's/#PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config
+            sed -i 's/PasswordAuthentication no/PasswordAuthentication yes/' /etc/ssh/sshd_config
+
+            service ssh start || /usr/sbin/sshd &
+
+            echo 'SSH running.'
+          "
+
+      - name: Setup Metasploit DB
+        run: |
+          docker exec kali bash -c "
+            # Init MSF database (postgresql)
+            apt-get install -y postgresql 2>/dev/null || true
+
+            service postgresql start || true
+            sleep 3
+
+            msfdb init 2>/dev/null || true
+
+            echo 'Metasploit DB ready.'
+          " || echo "MSF DB init skipped — non-fatal"
+
+      - name: Install Extra Go Tools
+        run: |
+          docker exec kali bash -c "
+            export GOPATH=/root/go
+            export PATH=\$PATH:/usr/local/go/bin:\$GOPATH/bin
+
+            # Fast subdomain enum
+            go install github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest 2>/dev/null || true
+
+            # HTTP toolkit
+            go install github.com/projectdiscovery/httpx/cmd/httpx@latest 2>/dev/null || true
+
+            # Nuclei — vulnerability scanner
+            go install github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest 2>/dev/null || true
+
+            # Naabu — port scanner
+            go install github.com/projectdiscovery/naabu/v2/cmd/naabu@latest 2>/dev/null || true
+
+            # Katana — web crawler
+            go install github.com/projectdiscovery/katana/cmd/katana@latest 2>/dev/null || true
+
+            echo 'Go tools installed.'
+          " || echo "Some Go tools skipped — non-fatal"
+
+      - name: Install Tailscale in Kali
+        run: |
+          docker exec kali bash -c "
+            curl -fsSL https://tailscale.com/install.sh | sh
+            echo 'Tailscale installed in Kali.'
+          "
+
+      - name: Connect Tailscale
+        env:
+          TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
+        run: |
+          docker exec kali bash -c "
+            tailscaled --state=/var/lib/tailscale/tailscaled.state &
+            sleep 3
+
+            tailscale up \
+              --authkey='${TAILSCALE_AUTH_KEY}' \
+              --hostname='kali-runner-${GITHUB_RUN_ID}' \
+              --accept-routes
+
+            sleep 5
+
+            TSIP=\$(tailscale ip -4 2>/dev/null | head -1)
+            echo \"Tailscale IP: \$TSIP\"
+            echo \"TAILSCALE_IP=\$TSIP\" >> /tmp/ts_env
+          " || true
+
+          # Pull IP back to host env
+          TSIP=$(docker exec kali tailscale ip -4 2>/dev/null | head -1 | tr -d '[:space:]')
+          echo "TAILSCALE_IP=${TSIP}" >> $GITHUB_ENV
+          echo "Kali Tailscale IP: ${TSIP}"
+
+      - name: Verify RDP Port
+        run: |
+          sleep 5
+
+          nc -zv $TAILSCALE_IP 3389 && echo "RDP port open." || echo "RDP check — may need a moment"
+          nc -zv $TAILSCALE_IP 22   && echo "SSH port open." || echo "SSH check failed"
+
+      - name: Display Access Info
+        run: |
+          echo ""
+          echo "========================================"
+          echo "        KALI LINUX ACCESS INFO"
+          echo "========================================"
+          echo "Tailscale IP : $TAILSCALE_IP"
+          echo "Username     : $RDP_USERNAME"
+          echo "Password     : $RDP_PASSWORD"
+          echo "RDP Port     : 3389"
+          echo "SSH Port     : 22"
+          echo "========================================"
+          echo ""
+          echo "SSH:  ssh hacker@$TAILSCALE_IP"
+          echo "RDP:  connect via Remote Desktop to $TAILSCALE_IP"
+          echo ""
+          echo "TOOLS INSTALLED:"
+          echo "  Recon    — nmap, masscan, amass, theHarvester, recon-ng"
+          echo "  Web      — burpsuite, nikto, gobuster, ffuf, sqlmap, whatweb"
+          echo "  Passwords— hydra, john, hashcat, wordlists, crunch, medusa"
+          echo "  Exploit  — metasploit, exploitdb"
+          echo "  Pivot    — proxychains4, chisel, ligolo-ng, evil-winrm, impacket"
+          echo "  Wireless — aircrack-ng, kismet, bettercap"
+          echo "  Forensics— binwalk, volatility3, exiftool, steghide"
+          echo "  RevEng   — ghidra, radare2, gdb+pwndbg, ltrace, strace"
+          echo "  Network  — wireshark, tshark, ettercap, tcpdump"
+          echo "  Go tools — subfinder, httpx, nuclei, naabu, katana"
+          echo "  Python   — pwntools, scapy, impacket, shodan, cryptography"
+          echo "  Desktop  — XFCE4 via XRDP"
+          echo "========================================"
+
+      - name: Keep Alive
+        run: |
+          echo "Kali active. Cancel workflow when done."
+
+          while true; do
+            echo "[$(date '+%H:%M:%S')] alive — kali running"
+            sleep 300
+          done
